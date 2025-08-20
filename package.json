@@ -1,0 +1,8 @@
+{
+  "name": "stripe-connect-backend",
+  "version": "1.0.0",
+  "dependencies": {
+    "stripe": "^14.0.0",
+    "@memberstack/admin": "^1.0.0"
+  }
+}
