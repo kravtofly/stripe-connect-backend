@@ -96,6 +96,13 @@ module.exports = async function handler(req, res) {
     }
   }
 
+  export const config = {
+  api: {
+    bodyParser: false,
+  },
+};
+
+
   // Always return 200 quickly so Stripe doesn’t keep retrying (unless signature failed)
   return res.status(200).json({ received: true });
 };
