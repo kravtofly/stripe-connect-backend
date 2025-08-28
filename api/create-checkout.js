@@ -2,6 +2,15 @@
 const Stripe = require('stripe');
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
+// --- CORS helpers ---
+const ALLOWED_ORIGIN = process.env.PUBLIC_SITE_URL || 'https://www.kravtofly.com';
+function setCors(res) {
+  res.setHeader('Access-Control-Allow-Origin', ALLOWED_ORIGIN);
+  res.setHeader('Vary', 'Origin');
+  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+}
+
 // --- Webflow helper (throws with useful detail) ---
 async function wfFetch(url) {
   const r = await fetch(url, {
@@ -27,13 +36,9 @@ async function getLabById(labId) {
   );
   const f = item?.fieldData || {};
 
-  // Title
   const title = f['name'] || 'Krāv Flight Lab';
-
-  // Preferred: Stripe Price stored on the lab (optional)
   const priceId = f['price_id'] || null;
 
-  // Fallback: convert your dollars field to cents
   let priceCents = null;
   if (!priceId) {
     const dollars = f['total-price-per-student-per-flight-lab'];
@@ -42,16 +47,12 @@ async function getLabById(labId) {
     }
   }
 
-  // You’re using this as REMAINING seats (Make decrements it after purchase)
   const seatsRemaining =
     typeof f['maximum-number-of-participants'] === 'number'
       ? f['maximum-number-of-participants']
       : null;
 
-  // Coach relation (we’ll dereference to get acct_…)
   const coachRefId = f['coach'] || null;
-
-  // Optional per-lab redirects (fallbacks provided later)
   const successUrl = f['success_url'] || null;
   const cancelUrl = f['cancel_url'] || null;
 
@@ -86,64 +87,53 @@ async function getCoachConnectId(coachItemId) {
 function calcPlatformFeeCents(priceCents) {
   const fixed = process.env.PLATFORM_FEE_CENTS ? Number(process.env.PLATFORM_FEE_CENTS) : null;
   if (fixed != null && Number.isFinite(fixed)) return Math.max(0, Math.round(fixed));
-  const pct = Number(process.env.PLATFORM_FEE_PCT || '0.15');
+  const pct = Number(process.env.PLATFORM_FEE_PCT || '0.20');
   if (!priceCents || Number.isNaN(priceCents)) return 0;
   return Math.max(0, Math.round(priceCents * pct));
 }
 
 module.exports = async function handler(req, res) {
+  // --- Handle CORS preflight ---
+  if (req.method === 'OPTIONS') {
+    setCors(res);
+    return res.status(204).end();
+  }
+
   try {
     if (req.method !== 'POST') {
-      res.setHeader('Allow', 'POST');
+      setCors(res);
+      res.setHeader('Allow', 'POST, OPTIONS');
       return res.status(405).send('Method Not Allowed');
     }
     if (!(req.headers['content-type'] || '').includes('application/json')) {
+      setCors(res);
       return res.status(415).json({ error: 'Use application/json' });
     }
 
     const { labId, studentName, studentEmail } = req.body || {};
-    if (!labId) return res.status(400).json({ error: 'Missing labId' });
+    if (!labId) {
+      setCors(res);
+      return res.status(400).json({ error: 'Missing labId' });
+    }
 
     // 1) Load Lab from Webflow
     const lab = await getLabById(labId);
 
     // 2) Block creating a session when you have no seats left
     if (typeof lab.seatsRemaining === 'number' && lab.seatsRemaining <= 0) {
+      setCors(res);
       return res.status(409).json({ error: 'Sold out' });
     }
 
     // 3) Load Coach Connect ID from Coach collection
     const coachConnectId = await getCoachConnectId(lab.coachRefId);
     if (!coachConnectId) {
+      setCors(res);
       return res.status(400).json({
         error:
           'Coach Stripe Connect ID not found on Coach item (field "coach-stripe-account-id").',
       });
     }
-
-    // 3.5) Preflight: verify the coach account exists in this Stripe MODE and can charge
-    let connectAcct;
-    try {
-      connectAcct = await stripe.accounts.retrieve(coachConnectId);
-    } catch (e) {
-      return res.status(400).json({
-        error: `Coach account ${coachConnectId} not found for this Stripe mode. Likely a TEST/LIVE mismatch.`,
-        details: e.message,
-      });
-    }
-    if (!connectAcct.charges_enabled) {
-      return res.status(400).json({
-        error: 'Coach account is not charges_enabled yet. Please complete onboarding.',
-      });
-    }
-
-    // Log mode + coach for easier debugging in Vercel logs
-    console.log(
-      '[create-checkout] mode:',
-      process.env.STRIPE_SECRET_KEY?.startsWith('sk_live_') ? 'LIVE' : 'TEST',
-      'coach:',
-      coachConnectId
-    );
 
     // 4) Build line item
     let lineItem;
@@ -159,6 +149,7 @@ module.exports = async function handler(req, res) {
         },
       };
     } else {
+      setCors(res);
       return res.status(400).json({
         error:
           'No price configured for this lab (add "price_id" or set "total-price-per-student-per-flight-lab").',
@@ -167,7 +158,6 @@ module.exports = async function handler(req, res) {
 
     const feeCents = calcPlatformFeeCents(lab.priceCents);
 
-    // 5) Choose redirect URLs (env overrides > per-lab > defaults)
     const successUrl =
       process.env.CHECKOUT_SUCCESS_URL ||
       lab.successUrl ||
@@ -178,7 +168,7 @@ module.exports = async function handler(req, res) {
       lab.cancelUrl ||
       `${process.env.PUBLIC_SITE_URL}/flight-lab/${lab.id}?status=cancelled`;
 
-    // 6) Create a fresh Checkout Session (destination charge)
+    // 5) Create a fresh Checkout Session
     const session = await stripe.checkout.sessions.create({
       mode: 'payment',
       line_items: [lineItem],
@@ -204,9 +194,11 @@ module.exports = async function handler(req, res) {
       allow_promotion_codes: true,
     });
 
+    setCors(res);
     return res.status(200).json({ url: session.url });
   } catch (err) {
     console.error('create-checkout error:', err);
+    setCors(res);
     return res.status(500).json({ error: 'Failed to create checkout session' });
   }
 };
