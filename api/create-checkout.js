@@ -11,7 +11,7 @@ function setCors(res) {
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 }
 
-// --- Webflow helper (throws with useful detail) ---
+// --- Webflow helper ---
 async function wfFetch(url) {
   const r = await fetch(url, {
     headers: {
@@ -26,46 +26,55 @@ async function wfFetch(url) {
   return r.json();
 }
 
-// Map your Flight Lab item (tailored to your keys)
-async function getLabById(labId) {
-  const labsCollectionId = process.env.WEBFLOW_COLLECTION_ID;
-  if (!labsCollectionId) throw new Error('Missing WEBFLOW_COLLECTION_ID');
-
-  const item = await wfFetch(
-    `https://api.webflow.com/v2/collections/${labsCollectionId}/items/${labId}`
-  );
+// Map a Webflow item to our lab shape
+function mapItemToLab(item) {
   const f = item?.fieldData || {};
-
-  const title = f['name'] || 'Krāv Flight Lab';
-  const priceId = f['price_id'] || null;
-
-  let priceCents = null;
-  if (!priceId) {
-    const dollars = f['total-price-per-student-per-flight-lab'];
-    if (typeof dollars === 'number' && Number.isFinite(dollars)) {
-      priceCents = Math.round(dollars * 100);
-    }
-  }
-
-  const seatsRemaining =
-    typeof f['maximum-number-of-participants'] === 'number'
-      ? f['maximum-number-of-participants']
-      : null;
-
-  const coachRefId = f['coach'] || null;
-  const successUrl = f['success_url'] || null;
-  const cancelUrl = f['cancel_url'] || null;
-
   return {
     id: item?.id,
-    title,
-    priceId,
-    priceCents,
-    seatsRemaining,
-    coachRefId,
-    successUrl,
-    cancelUrl,
+    title: f['name'] || 'Krāv Flight Lab',
+    priceId: f['price_id'] || null,
+    priceCents:
+      typeof f['total-price-per-student-per-flight-lab'] === 'number'
+        ? Math.round(f['total-price-per-student-per-flight-lab'] * 100)
+        : null,
+    seatsRemaining:
+      typeof f['maximum-number-of-participants'] === 'number'
+        ? f['maximum-number-of-participants']
+        : null,
+    coachRefId: f['coach'] || null,
+    successUrl: f['success_url'] || null,
+    cancelUrl: f['cancel_url'] || null,
   };
+}
+
+async function getLabById(labId) {
+  const collectionId = process.env.WEBFLOW_COLLECTION_ID;
+  if (!collectionId) throw new Error('Missing WEBFLOW_COLLECTION_ID');
+  const item = await wfFetch(`https://api.webflow.com/v2/collections/${collectionId}/items/${labId}`);
+  return mapItemToLab(item);
+}
+
+// Webflow v2 list API doesn’t officially filter by slug, so paginate and find it
+async function getLabBySlug(slug) {
+  const collectionId = process.env.WEBFLOW_COLLECTION_ID;
+  if (!collectionId) throw new Error('Missing WEBFLOW_COLLECTION_ID');
+
+  let offset = 0;
+  const limit = 100;
+  let found = null;
+
+  while (!found && offset < 1000) { // safety cap
+    const data = await wfFetch(
+      `https://api.webflow.com/v2/collections/${collectionId}/items?limit=${limit}&offset=${offset}`
+    );
+    const items = data.items || [];
+    found = items.find((it) => it?.slug === slug) || null;
+    if (found) break;
+    if (items.length < limit) break; // no more pages
+    offset += limit;
+  }
+
+  return found ? mapItemToLab(found) : null;
 }
 
 // Read the coach item and pull their Connect account from 'coach-stripe-account-id'
@@ -93,7 +102,7 @@ function calcPlatformFeeCents(priceCents) {
 }
 
 module.exports = async function handler(req, res) {
-  // --- Handle CORS preflight ---
+  // CORS preflight
   if (req.method === 'OPTIONS') {
     setCors(res);
     return res.status(204).end();
@@ -110,32 +119,35 @@ module.exports = async function handler(req, res) {
       return res.status(415).json({ error: 'Use application/json' });
     }
 
-    const { labId, studentName, studentEmail } = req.body || {};
-    if (!labId) {
+    const { labId, labSlug, studentName, studentEmail } = req.body || {};
+    if (!labId && !labSlug) {
       setCors(res);
-      return res.status(400).json({ error: 'Missing labId' });
+      return res.status(400).json({ error: 'Missing labId or labSlug' });
     }
 
-    // 1) Load Lab from Webflow
-    const lab = await getLabById(labId);
+    // Resolve lab by id OR slug
+    const lab = labId ? await getLabById(labId) : await getLabBySlug(labSlug);
+    if (!lab) {
+      setCors(res);
+      return res.status(404).json({ error: 'Flight Lab not found' });
+    }
 
-    // 2) Block creating a session when you have no seats left
+    // Sold-out guard
     if (typeof lab.seatsRemaining === 'number' && lab.seatsRemaining <= 0) {
       setCors(res);
       return res.status(409).json({ error: 'Sold out' });
     }
 
-    // 3) Load Coach Connect ID from Coach collection
+    // Coach Connect ID
     const coachConnectId = await getCoachConnectId(lab.coachRefId);
     if (!coachConnectId) {
       setCors(res);
       return res.status(400).json({
-        error:
-          'Coach Stripe Connect ID not found on Coach item (field "coach-stripe-account-id").',
+        error: 'Coach Stripe Connect ID not found on Coach item (field "coach-stripe-account-id").',
       });
     }
 
-    // 4) Build line item
+    // Line item
     let lineItem;
     if (lab.priceId) {
       lineItem = { price: lab.priceId, quantity: 1 };
@@ -151,8 +163,7 @@ module.exports = async function handler(req, res) {
     } else {
       setCors(res);
       return res.status(400).json({
-        error:
-          'No price configured for this lab (add "price_id" or set "total-price-per-student-per-flight-lab").',
+        error: 'No price configured for this lab (add "price_id" or set "total-price-per-student-per-flight-lab").',
       });
     }
 
@@ -168,7 +179,6 @@ module.exports = async function handler(req, res) {
       lab.cancelUrl ||
       `${process.env.PUBLIC_SITE_URL}/flight-lab/${lab.id}?status=cancelled`;
 
-    // 5) Create a fresh Checkout Session
     const session = await stripe.checkout.sessions.create({
       mode: 'payment',
       line_items: [lineItem],
