@@ -86,7 +86,7 @@ async function getCoachConnectId(coachItemId) {
 function calcPlatformFeeCents(priceCents) {
   const fixed = process.env.PLATFORM_FEE_CENTS ? Number(process.env.PLATFORM_FEE_CENTS) : null;
   if (fixed != null && Number.isFinite(fixed)) return Math.max(0, Math.round(fixed));
-  const pct = Number(process.env.PLATFORM_FEE_PCT || '0.20');
+  const pct = Number(process.env.PLATFORM_FEE_PCT || '0.15');
   if (!priceCents || Number.isNaN(priceCents)) return 0;
   return Math.max(0, Math.round(priceCents * pct));
 }
@@ -120,6 +120,30 @@ module.exports = async function handler(req, res) {
           'Coach Stripe Connect ID not found on Coach item (field "coach-stripe-account-id").',
       });
     }
+
+    // 3.5) Preflight: verify the coach account exists in this Stripe MODE and can charge
+    let connectAcct;
+    try {
+      connectAcct = await stripe.accounts.retrieve(coachConnectId);
+    } catch (e) {
+      return res.status(400).json({
+        error: `Coach account ${coachConnectId} not found for this Stripe mode. Likely a TEST/LIVE mismatch.`,
+        details: e.message,
+      });
+    }
+    if (!connectAcct.charges_enabled) {
+      return res.status(400).json({
+        error: 'Coach account is not charges_enabled yet. Please complete onboarding.',
+      });
+    }
+
+    // Log mode + coach for easier debugging in Vercel logs
+    console.log(
+      '[create-checkout] mode:',
+      process.env.STRIPE_SECRET_KEY?.startsWith('sk_live_') ? 'LIVE' : 'TEST',
+      'coach:',
+      coachConnectId
+    );
 
     // 4) Build line item
     let lineItem;
