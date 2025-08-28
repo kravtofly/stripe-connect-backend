@@ -21,33 +21,32 @@ module.exports = async function handler(req, res) {
   if (!sig) return res.status(400).send('Missing stripe-signature header');
 
   let event;
-  let rawBody;
   try {
-    rawBody = await getRawBody(req);                    // <— RAW body as Buffer
+    const rawBody = await getRawBody(req); // RAW Buffer
     event = stripe.webhooks.constructEvent(
       rawBody,
       sig,
-      process.env.STRIPE_WEBHOOK_SECRET                 // <— set in Vercel later
+      process.env.STRIPE_WEBHOOK_SECRET
     );
   } catch (err) {
     console.error('Webhook signature verification failed:', err.message);
     return res.status(400).send(`Webhook Error: ${err.message}`);
   }
 
-  // We only need this one right now
   if (event.type === 'checkout.session.completed') {
     const session = event.data.object;
 
-    // Fetch expanded session for line items/details (lives on PLATFORM in dest-charges)
-    let full;
+    // Try to expand line items (optional)
+    let full = session;
     try {
-      full = await stripe.checkout.sessions.retrieve(session.id, { expand: ['line_items'] });
+      full = await stripe.checkout.sessions.retrieve(session.id, {
+        expand: ['line_items'],
+      });
     } catch (e) {
       console.error('Failed to retrieve session with expand:', e);
-      full = session; // fallback
     }
 
-    // Prepare a minimal, normalized payload for Make
+    // Build a clean payload for Make
     const payload = {
       event_id: event.id,
       event_type: event.type,
@@ -59,35 +58,37 @@ module.exports = async function handler(req, res) {
         amount_total: full.amount_total,
         currency: full.currency,
         metadata: full.metadata || {},
-        line_items: (full.line_items?.data || []).map(li => ({
+        line_items: (full.line_items?.data || []).map((li) => ({
           description: li.description,
           quantity: li.quantity,
           amount_total: li.amount_total,
           amount_subtotal: li.amount_subtotal,
-          price: li.price ? {
-            id: li.price.id,
-            unit_amount: li.price.unit_amount,
-            currency: li.price.currency
-          } : null
-        }))
-      }
+          price: li.price
+            ? {
+                id: li.price.id,
+                unit_amount: li.price.unit_amount,
+                currency: li.price.currency,
+              }
+            : null,
+        })),
+      },
     };
 
-    // Forward to Make (optional shared secret header)
+    // Forward to Make (non-blocking; Stripe will retry if we return >= 400)
     try {
       const resp = await fetch(process.env.MAKE_WEBHOOK_URL, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'X-Bridge-Secret': process.env.MAKE_FORWARDING_SECRET || ''  // optional check in Make
+          'X-Bridge-Secret': process.env.MAKE_FORWARDING_SECRET || '',
         },
-        body: JSON.stringify(payload)
+        body: JSON.stringify(payload),
       });
 
       if (!resp.ok) {
         const text = await resp.text();
         console.error('Forward to Make failed:', resp.status, text);
-        // 202 = we received it but couldn’t forward; Stripe will retry
+        // Accept event so Stripe stops retrying; you can monitor forwarding failures in logs
         return res.status(202).json({ received: true, forwarded: false });
       }
     } catch (err) {
@@ -96,13 +97,13 @@ module.exports = async function handler(req, res) {
     }
   }
 
-  export const config = {
+  // Always 200 (unless signature failed) so Stripe doesn’t keep retrying
+  return res.status(200).json({ received: true });
+};
+
+// ✅ CommonJS config for Vercel Serverless Functions (disables body parsing)
+module.exports.config = {
   api: {
     bodyParser: false,
   },
-};
-
-
-  // Always return 200 quickly so Stripe doesn’t keep retrying (unless signature failed)
-  return res.status(200).json({ received: true });
 };
