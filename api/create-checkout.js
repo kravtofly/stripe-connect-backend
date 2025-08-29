@@ -101,7 +101,7 @@ async function getCoachConnectId(coachItemId) {
     `https://api.webflow.com/v2/collections/${coachCollectionId}/items/${coachItemId}`
   );
   const cf = coachItem?.fieldData || {};
-  const acct = cf['coach-stripe-account-id'];
+  const acct = cf['stripe-account-id'];
   if (typeof acct === 'string' && acct.startsWith('acct_')) return acct;
   return null;
 }
@@ -181,7 +181,7 @@ module.exports = async function handler(req, res) {
     if (!coachConnectId) {
       setCors(req, res);
       return res.status(400).json({
-        error: 'Coach Stripe Connect ID not found on Coach item (field "coach-stripe-account-id").',
+        error: 'Stripe Connect ID not found on Coach item (field "stripe-account-id").',
       });
     }
 
