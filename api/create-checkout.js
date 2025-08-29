@@ -49,7 +49,7 @@ function mapItemToLab(item) {
       typeof f['total-price-per-student-per-flight-lab'] === 'number'
         ? Math.round(f['total-price-per-student-per-flight-lab'] * 100)
         : null,
-    // You use this as REMAINING seats (Make decrements it)
+    // You’re using this as REMAINING seats (Make decrements it on success)
     seatsRemaining:
       typeof f['maximum-number-of-participants'] === 'number'
         ? f['maximum-number-of-participants']
@@ -67,7 +67,7 @@ async function getLabById(labId) {
   return mapItemToLab(item);
 }
 
-// Paginate & find by slug (optionally filtered to a locale)
+// Fallback: paginate & find by slug (if your collection returns slugs)
 async function getLabBySlug(slug) {
   const collectionId = process.env.WEBFLOW_COLLECTION_ID;
   if (!collectionId) throw new Error('Missing WEBFLOW_COLLECTION_ID');
@@ -100,10 +100,18 @@ async function getCoachConnectId(coachItemId) {
   const coachItem = await wfFetch(
     `https://api.webflow.com/v2/collections/${coachCollectionId}/items/${coachItemId}`
   );
-  const cf = coachItem?.fieldData || {};
-  const acct = cf['stripe-account-id'];
-  if (typeof acct === 'string' && acct.startsWith('acct_')) return acct;
-  return null;
+  const f = coachItem?.fieldData || {};
+
+  // Try multiple possible slugs and return the first valid acct_… value
+  const candidates = [
+    f['coach-stripe-account-id'], // present in your data for Chris
+    f['stripe-account-id'],       // present on some sites
+    f['coach_stripe_account_id'],
+    f['stripe_account_id'],
+  ];
+
+  const acct = candidates.find(v => typeof v === 'string' && v.startsWith('acct_')) || null;
+  return acct;
 }
 
 /* =========================
@@ -162,8 +170,19 @@ module.exports = async function handler(req, res) {
       return res.status(400).json({ error: 'Missing labId or labSlug' });
     }
 
-    // Resolve lab by id or slug
-    const lab = labId ? await getLabById(labId) : await getLabBySlug(labSlug);
+    // Resolve lab by id (preferred) or slug
+    let lab = null;
+    try {
+      lab = labId ? await getLabById(labId) : await getLabBySlug(labSlug);
+    } catch (e) {
+      // Convert a direct Webflow 404 into our clean 404
+      if (String(e.message).includes('resource_not_found')) {
+        setCors(req, res);
+        return res.status(404).json({ error: 'Flight Lab not found' });
+      }
+      throw e;
+    }
+
     if (!lab) {
       console.error('Lab not found', { labId, labSlug });
       setCors(req, res);
@@ -181,7 +200,8 @@ module.exports = async function handler(req, res) {
     if (!coachConnectId) {
       setCors(req, res);
       return res.status(400).json({
-        error: 'Stripe Connect ID not found on Coach item (field "stripe-account-id").',
+        error:
+          'Stripe Connect ID not found on Coach item (try field slugs "coach-stripe-account-id" or "stripe-account-id").',
       });
     }
 
@@ -249,6 +269,10 @@ module.exports = async function handler(req, res) {
   } catch (err) {
     console.error('create-checkout error:', err);
     setCors(req, res);
+    // Optionally expose detailed Stripe errors during debugging:
+    if (process.env.DEBUG_STRIPE_ERRORS === 'true' && err && err.message) {
+      return res.status(500).json({ error: err.message, code: err.code || null });
+    }
     return res.status(500).json({ error: 'Failed to create checkout session' });
   }
 };
