@@ -13,13 +13,29 @@ const ORIGINS = (process.env.ALLOWED_ORIGINS || '')
 function setCors(req, res) {
   const origin = req.headers.origin;
   if (origin && ORIGINS.includes(origin)) {
-    res.setHeader('Access-Control-Allow-Origin', origin); // reflect allowed origin
+    res.setHeader('Access-Control-Allow-Origin', origin);
   } else if (ORIGINS.length) {
     res.setHeader('Access-Control-Allow-Origin', ORIGINS[0]);
   }
   res.setHeader('Vary', 'Origin');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+}
+
+/* =========================
+   URL helpers
+   ========================= */
+function isAbsoluteUrl(u) {
+  return typeof u === 'string' && /^https?:\/\//i.test(u);
+}
+function absoluteUrl(u) {
+  if (!u) return null;
+  if (isAbsoluteUrl(u)) return u;
+  const base = (process.env.PUBLIC_SITE_URL || '').trim();
+  if (!isAbsoluteUrl(base)) return null; // cannot normalize without a base
+  const baseNoSlash = base.replace(/\/+$/, '');
+  const path = u.startsWith('/') ? u : `/${u}`;
+  return `${baseNoSlash}${path}`;
 }
 
 /* =========================
@@ -49,7 +65,6 @@ function mapItemToLab(item) {
       typeof f['total-price-per-student-per-flight-lab'] === 'number'
         ? Math.round(f['total-price-per-student-per-flight-lab'] * 100)
         : null,
-    // You’re using this as REMAINING seats (Make decrements it on success)
     seatsRemaining:
       typeof f['maximum-number-of-participants'] === 'number'
         ? f['maximum-number-of-participants']
@@ -101,15 +116,12 @@ async function getCoachConnectId(coachItemId) {
     `https://api.webflow.com/v2/collections/${coachCollectionId}/items/${coachItemId}`
   );
   const f = coachItem?.fieldData || {};
-
-  // Try multiple possible slugs and return the first valid acct_… value
   const candidates = [
-    f['coach-stripe-account-id'], // present in your data for Chris
-    f['stripe-account-id'],       // present on some sites
+    f['coach-stripe-account-id'],
+    f['stripe-account-id'],
     f['coach_stripe_account_id'],
     f['stripe_account_id'],
   ];
-
   const acct = candidates.find(v => typeof v === 'string' && v.startsWith('acct_')) || null;
   return acct;
 }
@@ -148,54 +160,45 @@ module.exports = async function handler(req, res) {
 
     const { labId, labSlug, studentName, studentEmail } = req.body || {};
 
-    // Debug line (check in Vercel logs)
-    console.log(
-      JSON.stringify(
-        {
-          tag: 'create-checkout:incoming',
-          mode: process.env.STRIPE_SECRET_KEY?.startsWith('sk_live_') ? 'LIVE' : 'TEST',
-          labId: labId || null,
-          labSlug: labSlug || null,
-          WEBFLOW_COLLECTION_ID: process.env.WEBFLOW_COLLECTION_ID || null,
-          WEBFLOW_CMS_LOCALE_ID: process.env.WEBFLOW_CMS_LOCALE_ID || null,
-          origin: req.headers.origin || null,
-        },
-        null,
-        2
-      )
-    );
+    // Debug
+    console.log(JSON.stringify({
+      tag: 'create-checkout:incoming',
+      mode: process.env.STRIPE_SECRET_KEY?.startsWith('sk_live_') ? 'LIVE' : 'TEST',
+      labId: labId || null,
+      labSlug: labSlug || null,
+      WEBFLOW_COLLECTION_ID: process.env.WEBFLOW_COLLECTION_ID || null,
+      WEBFLOW_CMS_LOCALE_ID: process.env.WEBFLOW_CMS_LOCALE_ID || null,
+      origin: req.headers.origin || null,
+    }, null, 2));
 
     if (!labId && !labSlug) {
       setCors(req, res);
       return res.status(400).json({ error: 'Missing labId or labSlug' });
     }
 
-    // Resolve lab by id (preferred) or slug
+    // Resolve Lab
     let lab = null;
     try {
       lab = labId ? await getLabById(labId) : await getLabBySlug(labSlug);
     } catch (e) {
-      // Convert a direct Webflow 404 into our clean 404
       if (String(e.message).includes('resource_not_found')) {
         setCors(req, res);
         return res.status(404).json({ error: 'Flight Lab not found' });
       }
       throw e;
     }
-
     if (!lab) {
-      console.error('Lab not found', { labId, labSlug });
       setCors(req, res);
       return res.status(404).json({ error: 'Flight Lab not found' });
     }
 
-    // Sold out guard
+    // Seats guard
     if (typeof lab.seatsRemaining === 'number' && lab.seatsRemaining <= 0) {
       setCors(req, res);
       return res.status(409).json({ error: 'Sold out' });
     }
 
-    // Coach Connect account
+    // Coach Connect ID
     const coachConnectId = await getCoachConnectId(lab.coachRefId);
     if (!coachConnectId) {
       setCors(req, res);
@@ -226,19 +229,28 @@ module.exports = async function handler(req, res) {
       });
     }
 
-    const feeCents = calcPlatformFeeCents(lab.priceCents);
+    // Normalize success/cancel URLs
+    const rawSuccess =
+      process.env.CHECKOUT_SUCCESS_URL || lab.successUrl || `/flight-lab/${lab.id}?status=success`;
+    const rawCancel =
+      process.env.CHECKOUT_CANCEL_URL || lab.cancelUrl || `/flight-lab/${lab.id}?status=cancelled`;
 
-    const successUrl =
-      process.env.CHECKOUT_SUCCESS_URL ||
-      lab.successUrl ||
-      `${process.env.PUBLIC_SITE_URL}/flight-lab/${lab.id}?status=success`;
+    const successUrl = absoluteUrl(rawSuccess);
+    const cancelUrl  = absoluteUrl(rawCancel);
 
-    const cancelUrl =
-      process.env.CHECKOUT_CANCEL_URL ||
-      lab.cancelUrl ||
-      `${process.env.PUBLIC_SITE_URL}/flight-lab/${lab.id}?status=cancelled`;
+    if (!successUrl || !cancelUrl) {
+      console.error('URL normalization failed', {
+        PUBLIC_SITE_URL: process.env.PUBLIC_SITE_URL,
+        rawSuccess, rawCancel, successUrl, cancelUrl
+      });
+      setCors(req, res);
+      return res.status(500).json({
+        error:
+          'Invalid success/cancel URL. Ensure PUBLIC_SITE_URL is set to an https URL and that any CMS URLs are absolute or relative paths.',
+      });
+    }
 
-    // Create a fresh Checkout Session
+    // Create Checkout Session
     const session = await stripe.checkout.sessions.create({
       mode: 'payment',
       line_items: [lineItem],
@@ -253,7 +265,7 @@ module.exports = async function handler(req, res) {
       ],
       payment_intent_data: {
         transfer_data: { destination: coachConnectId },
-        application_fee_amount: feeCents,
+        application_fee_amount: calcPlatformFeeCents(lab.priceCents),
       },
       metadata: {
         flight_lab_id: lab.id,
@@ -269,7 +281,6 @@ module.exports = async function handler(req, res) {
   } catch (err) {
     console.error('create-checkout error:', err);
     setCors(req, res);
-    // Optionally expose detailed Stripe errors during debugging:
     if (process.env.DEBUG_STRIPE_ERRORS === 'true' && err && err.message) {
       return res.status(500).json({ error: err.message, code: err.code || null });
     }
