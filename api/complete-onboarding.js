@@ -72,7 +72,7 @@ module.exports = async function handler(req, res) {
       id: coachId,
       data: {
         customFields: {
-          'stripe-account-id': accountId
+          'coach-stripe-account-id': accountId
         }
       }
     });
