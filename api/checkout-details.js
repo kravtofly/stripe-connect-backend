@@ -15,6 +15,7 @@ function setCors(req, res) {
     res.setHeader('Access-Control-Allow-Origin', ORIGINS[0]);
   }
   res.setHeader('Vary', 'Origin');
+  res.setHeader('Access-Control-Allow-Credentials', 'true');
   res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 }
