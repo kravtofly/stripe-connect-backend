@@ -37,6 +37,12 @@ function absoluteUrl(u) {
   const path = u.startsWith('/') ? u : `/${u}`;
   return `${baseNoSlash}${path}`;
 }
+// Ensure success URL includes the Stripe token
+function ensureSessionToken(u) {
+  if (!u) return u;
+  if (u.includes('{CHECKOUT_SESSION_ID}')) return u;
+  return `${u}${u.includes('?') ? '&' : '?'}session_id={CHECKOUT_SESSION_ID}`;
+}
 
 /* =========================
    Webflow helpers
@@ -229,13 +235,23 @@ module.exports = async function handler(req, res) {
       });
     }
 
-    // Normalize success/cancel URLs
+    /* =========================
+       Normalize success/cancel URLs
+       - accept env or CMS values (absolute or relative)
+       - ensure success contains {CHECKOUT_SESSION_ID}
+       ========================= */
     const rawSuccess =
-      process.env.CHECKOUT_SUCCESS_URL || lab.successUrl || `/flight-lab/${lab.id}?status=success`;
-    const rawCancel =
-      process.env.CHECKOUT_CANCEL_URL || lab.cancelUrl || `/flight-lab/${lab.id}?status=cancelled`;
+      process.env.CHECKOUT_SUCCESS_URL   // may include token; may be absolute or relative
+      || lab.successUrl                  // may include token; may be absolute or relative
+      || '/flight-lab-success';          // default path (token appended below)
 
-    const successUrl = absoluteUrl(rawSuccess);
+    const rawCancel =
+      process.env.CHECKOUT_CANCEL_URL
+      || lab.cancelUrl
+      || '/flight-lab-cancelled';
+
+    const successUrlWithToken = ensureSessionToken(rawSuccess);
+    const successUrl = absoluteUrl(successUrlWithToken);
     const cancelUrl  = absoluteUrl(rawCancel);
 
     if (!successUrl || !cancelUrl) {
