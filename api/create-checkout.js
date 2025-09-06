@@ -177,7 +177,7 @@ module.exports = async function handler(req, res) {
 
     const { labId, labSlug, studentName, studentEmail } = req.body || {};
 
-    // Debug
+    // Debug (incoming)
     console.log(JSON.stringify({
       tag: 'create-checkout:incoming',
       mode: process.env.STRIPE_SECRET_KEY?.startsWith('sk_live_') ? 'LIVE' : 'TEST',
@@ -269,6 +269,17 @@ module.exports = async function handler(req, res) {
     const successUrl = absoluteUrl(successUrlWithToken);
     const cancelUrl  = absoluteUrl(rawCancel);
 
+    // ---- LOG PATCH: print all the URL stages ----
+    console.log(JSON.stringify({
+      tag: 'create-checkout:urls',
+      rawSuccess,
+      rawSuccessWithLab,
+      successUrlWithToken,
+      resolvedSuccess: successUrl,
+      resolvedCancel: cancelUrl,
+      publicSiteUrl: process.env.PUBLIC_SITE_URL || null
+    }, null, 2));
+
     if (!successUrl || !cancelUrl) {
       console.error('URL normalization failed', {
         PUBLIC_SITE_URL: process.env.PUBLIC_SITE_URL,
@@ -309,8 +320,20 @@ module.exports = async function handler(req, res) {
       allow_promotion_codes: true,
     });
 
+    // ---- LOG PATCH: show created session + the exact success_url Stripe has ----
+    console.log(JSON.stringify({
+      tag: 'create-checkout:session-created',
+      session_id: session.id,
+      success_url_sent: successUrl,
+      session_url: session.url
+    }, null, 2));
+
     setCors(req, res);
-    return res.status(200).json({ url: session.url });
+    const body = { url: session.url };
+    if ((process.env.DEBUG_SUCCESS_URLS || '').toLowerCase() === 'true') {
+      body.debug = { successUrl };
+    }
+    return res.status(200).json(body);
   } catch (err) {
     console.error('create-checkout error:', err);
     setCors(req, res);
