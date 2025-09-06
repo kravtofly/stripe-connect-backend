@@ -7,11 +7,8 @@ const ORIGINS = (process.env.ALLOWED_ORIGINS || '')
   .split(',').map(s => s.trim()).filter(Boolean);
 function setCors(req, res) {
   const origin = req.headers.origin;
-  if (origin && ORIGINS.includes(origin)) {
-    res.setHeader('Access-Control-Allow-Origin', origin);
-  } else if (ORIGINS.length) {
-    res.setHeader('Access-Control-Allow-Origin', ORIGINS[0]);
-  }
+  const allow = (origin && ORIGINS.includes(origin)) ? origin : '*'; // allow GETs broadly
+  res.setHeader('Access-Control-Allow-Origin', allow);
   res.setHeader('Vary', 'Origin');
   res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
