@@ -43,6 +43,17 @@ function ensureSessionToken(u) {
   if (u.includes('{CHECKOUT_SESSION_ID}')) return u;
   return `${u}${u.includes('?') ? '&' : '?'}session_id={CHECKOUT_SESSION_ID}`;
 }
+// Append one query param (works with relative or absolute URLs)
+function appendQueryParam(u, key, value) {
+  if (!u || value == null) return u;
+  const strVal = String(value);
+  const hashIndex = u.indexOf('#');
+  const hasHash = hashIndex >= 0;
+  const base = hasHash ? u.slice(0, hashIndex) : u;
+  const hash = hasHash ? u.slice(hashIndex) : '';
+  const sep = base.includes('?') ? '&' : '?';
+  return `${base}${sep}${encodeURIComponent(key)}=${encodeURIComponent(strVal)}${hash}`;
+}
 
 /* =========================
    Webflow helpers
@@ -62,9 +73,9 @@ async function wfFetch(url) {
 }
 
 function mapItemToLab(item) {
-  const f = item?.fieldData || {};
+  const f = item?.item?.fieldData || item?.fieldData || {};
   return {
-    id: item?.id,
+    id: item?.item?.id || item?.id,
     title: f['name'] || 'Krāv Flight Lab',
     priceId: f['price_id'] || null,
     priceCents:
@@ -121,7 +132,7 @@ async function getCoachConnectId(coachItemId) {
   const coachItem = await wfFetch(
     `https://api.webflow.com/v2/collections/${coachCollectionId}/items/${coachItemId}`
   );
-  const f = coachItem?.fieldData || {};
+  const f = coachItem?.item?.fieldData || coachItem?.fieldData || {};
   const candidates = [
     f['coach-stripe-account-id'],
     f['stripe-account-id'],
@@ -198,7 +209,7 @@ module.exports = async function handler(req, res) {
       return res.status(404).json({ error: 'Flight Lab not found' });
     }
 
-    // Seats guard
+    // Seats guard (basic max check as stored in CMS)
     if (typeof lab.seatsRemaining === 'number' && lab.seatsRemaining <= 0) {
       setCors(req, res);
       return res.status(409).json({ error: 'Sold out' });
@@ -238,19 +249,23 @@ module.exports = async function handler(req, res) {
     /* =========================
        Normalize success/cancel URLs
        - accept env or CMS values (absolute or relative)
+       - PATCH: append labId param so success page can show Add-to-Calendar (.ics)
        - ensure success contains {CHECKOUT_SESSION_ID}
        ========================= */
     const rawSuccess =
-      process.env.CHECKOUT_SUCCESS_URL   // may include token; may be absolute or relative
-      || lab.successUrl                  // may include token; may be absolute or relative
-      || '/flight-lab-success';          // default path (token appended below)
+      process.env.CHECKOUT_SUCCESS_URL
+      || lab.successUrl
+      || '/flight-lab-success';
 
     const rawCancel =
       process.env.CHECKOUT_CANCEL_URL
       || lab.cancelUrl
       || '/flight-lab-cancelled';
 
-    const successUrlWithToken = ensureSessionToken(rawSuccess);
+    // PATCH: add ?lab=<webflowItemId> prior to adding {CHECKOUT_SESSION_ID}
+    const rawSuccessWithLab = appendQueryParam(rawSuccess, 'lab', lab.id);
+
+    const successUrlWithToken = ensureSessionToken(rawSuccessWithLab);
     const successUrl = absoluteUrl(successUrlWithToken);
     const cancelUrl  = absoluteUrl(rawCancel);
 
@@ -283,9 +298,11 @@ module.exports = async function handler(req, res) {
         transfer_data: { destination: coachConnectId },
         application_fee_amount: calcPlatformFeeCents(lab.priceCents),
       },
+      // Helpful for webhooks & emails
       metadata: {
         flight_lab_id: lab.id,
         coach_connect_id: coachConnectId,
+        lab_title: lab.title,
       },
       success_url: successUrl,
       cancel_url: cancelUrl,
