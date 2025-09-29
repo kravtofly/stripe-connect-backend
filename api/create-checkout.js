@@ -1,6 +1,6 @@
 // /api/create-checkout.js
 const Stripe = require('stripe');
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, { apiVersion: '2024-06-20' });
 
 /* =========================
    CORS (allow-list)
@@ -99,7 +99,7 @@ async function getLabById(labId) {
   return mapItemToLab(item);
 }
 
-// Fallback: paginate & find by slug (if your collection returns slugs)
+// Fallback: paginate & find by slug
 async function getLabBySlug(slug) {
   const collectionId = process.env.WEBFLOW_COLLECTION_ID;
   if (!collectionId) throw new Error('Missing WEBFLOW_COLLECTION_ID');
@@ -146,12 +146,24 @@ async function getCoachConnectId(coachItemId) {
 /* =========================
    Fees
    ========================= */
-function calcPlatformFeeCents(priceCents) {
+// DEFAULT: 18% unless PLATFORM_FEE_PCT or PLATFORM_FEE_CENTS override
+function calcPlatformFeeCents(amountCents) {
   const fixed = process.env.PLATFORM_FEE_CENTS ? Number(process.env.PLATFORM_FEE_CENTS) : null;
   if (fixed != null && Number.isFinite(fixed)) return Math.max(0, Math.round(fixed));
-  const pct = Number(process.env.PLATFORM_FEE_PCT || '0.20');
-  if (!priceCents || Number.isNaN(priceCents)) return 0;
-  return Math.max(0, Math.round(priceCents * pct));
+  const pct = Number(process.env.PLATFORM_FEE_PCT || '0.18');
+  if (!amountCents || Number.isNaN(amountCents)) return 0;
+  return Math.max(0, Math.round(amountCents * pct));
+}
+
+// Resolve unit amount (cents) whether lab gives a numeric price or a priceId
+async function resolveUnitPriceCents(lab) {
+  if (typeof lab.priceCents === 'number' && lab.priceCents > 0) return lab.priceCents;
+  if (lab.priceId) {
+    const price = await stripe.prices.retrieve(lab.priceId);
+    const cents = price?.unit_amount ?? null;
+    if (typeof cents === 'number' && cents > 0) return cents;
+  }
+  return null;
 }
 
 /* =========================
@@ -225,7 +237,7 @@ module.exports = async function handler(req, res) {
       });
     }
 
-    // Line item
+    // Line item (priceId OR one-off price_data)
     let lineItem;
     if (lab.priceId) {
       lineItem = { price: lab.priceId, quantity: 1 };
@@ -246,11 +258,16 @@ module.exports = async function handler(req, res) {
       });
     }
 
+    // Compute platform fee from the actual unit amount (works for priceId or numeric)
+    const unitAmountCents = await resolveUnitPriceCents(lab);
+    if (!unitAmountCents) {
+      setCors(req, res);
+      return res.status(400).json({ error: 'Unable to resolve price for fee calculation' });
+    }
+    const platformFeeCents = calcPlatformFeeCents(unitAmountCents);
+
     /* =========================
        Normalize success/cancel URLs
-       - accept env or CMS values (absolute or relative)
-       - PATCH: append labId param so success page can show Add-to-Calendar (.ics)
-       - ensure success contains {CHECKOUT_SESSION_ID}
        ========================= */
     const rawSuccess =
       process.env.CHECKOUT_SUCCESS_URL
@@ -262,14 +279,13 @@ module.exports = async function handler(req, res) {
       || lab.cancelUrl
       || '/flight-lab-cancelled';
 
-    // PATCH: add ?lab=<webflowItemId> prior to adding {CHECKOUT_SESSION_ID}
+    // Add lab id param then ensure session token
     const rawSuccessWithLab = appendQueryParam(rawSuccess, 'lab', lab.id);
-
     const successUrlWithToken = ensureSessionToken(rawSuccessWithLab);
     const successUrl = absoluteUrl(successUrlWithToken);
     const cancelUrl  = absoluteUrl(rawCancel);
 
-    // ---- LOG PATCH: print all the URL stages ----
+    // Log URL stages
     console.log(JSON.stringify({
       tag: 'create-checkout:urls',
       rawSuccess,
@@ -292,7 +308,7 @@ module.exports = async function handler(req, res) {
       });
     }
 
-    // Create Checkout Session
+    // Create Checkout Session (destination charge)
     const session = await stripe.checkout.sessions.create({
       mode: 'payment',
       line_items: [lineItem],
@@ -307,10 +323,14 @@ module.exports = async function handler(req, res) {
       ],
       payment_intent_data: {
         transfer_data: { destination: coachConnectId },
-        application_fee_amount: calcPlatformFeeCents(lab.priceCents),
+        application_fee_amount: platformFeeCents,
+        // (optional best practice)
+        // on_behalf_of: coachConnectId,
       },
-      // Helpful for webhooks & emails
+      // Helpful for webhooks & automations
+      client_reference_id: `lab_${lab.id}`,
       metadata: {
+        kind: 'flight_lab',
         flight_lab_id: lab.id,
         coach_connect_id: coachConnectId,
         lab_title: lab.title,
@@ -320,12 +340,13 @@ module.exports = async function handler(req, res) {
       allow_promotion_codes: true,
     });
 
-    // ---- LOG PATCH: show created session + the exact success_url Stripe has ----
+    // Log created session
     console.log(JSON.stringify({
       tag: 'create-checkout:session-created',
       session_id: session.id,
       success_url_sent: successUrl,
-      session_url: session.url
+      session_url: session.url,
+      fee_cents: platformFeeCents
     }, null, 2));
 
     setCors(req, res);
