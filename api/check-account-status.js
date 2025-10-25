@@ -1,11 +1,11 @@
 // /api/check-account-status.js
-const { getStripeClient } = require('./lib/stripe');
-const { withCors } = require('./lib/cors');
-const { createLogger } = require('./lib/logger');
-const { withErrorHandling } = require('./lib/errors');
-const { ValidationError } = require('./lib/errors');
-const { HTTP_STATUS } = require('./lib/constants');
-const { isValidStripeAccountId } = require('./lib/validation');
+const { getStripeClient } = require('../lib/stripe');
+const { withCors } = require('../lib/cors');
+const { createLogger } = require('../lib/logger');
+const { withErrorHandling } = require('../lib/errors');
+const { ValidationError } = require('../lib/errors');
+const { HTTP_STATUS } = require('../lib/constants');
+const { isValidStripeAccountId } = require('../lib/validation');
 
 const stripe = getStripeClient();
 const logger = createLogger('check-account-status');

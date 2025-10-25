@@ -1,11 +1,11 @@
 // /api/session-to-lab.js
-const { getStripeClient } = require('./lib/stripe');
-const { withCors } = require('./lib/cors');
-const { createLogger } = require('./lib/logger');
-const { withErrorHandling } = require('./lib/errors');
-const { ValidationError, NotFoundError } = require('./lib/errors');
-const { HTTP_STATUS, METADATA_KEYS } = require('./lib/constants');
-const { isValidStripeSessionId } = require('./lib/validation');
+const { getStripeClient } = require('../lib/stripe');
+const { withCors } = require('../lib/cors');
+const { createLogger } = require('../lib/logger');
+const { withErrorHandling } = require('../lib/errors');
+const { ValidationError, NotFoundError } = require('../lib/errors');
+const { HTTP_STATUS, METADATA_KEYS } = require('../lib/constants');
+const { isValidStripeSessionId } = require('../lib/validation');
 
 const stripe = getStripeClient();
 const logger = createLogger('session-to-lab');

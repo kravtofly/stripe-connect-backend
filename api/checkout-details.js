@@ -1,12 +1,12 @@
 // /api/checkout-details.js
-const { getStripeClient } = require('./lib/stripe');
-const { withCors } = require('./lib/cors');
-const { createLogger } = require('./lib/logger');
-const { withErrorHandling } = require('./lib/errors');
-const { ValidationError, NotFoundError } = require('./lib/errors');
-const { HTTP_STATUS, METADATA_KEYS, CHECKOUT_FIELDS, WEBFLOW_FIELDS } = require('./lib/constants');
-const { isValidStripeSessionId, requireEnv } = require('./lib/validation');
-const { getWebflowItem, getCoachDetails } = require('./lib/webflow');
+const { getStripeClient } = require('../lib/stripe');
+const { withCors } = require('../lib/cors');
+const { createLogger } = require('../lib/logger');
+const { withErrorHandling } = require('../lib/errors');
+const { ValidationError, NotFoundError } = require('../lib/errors');
+const { HTTP_STATUS, METADATA_KEYS, CHECKOUT_FIELDS, WEBFLOW_FIELDS } = require('../lib/constants');
+const { isValidStripeSessionId, requireEnv } = require('../lib/validation');
+const { getWebflowItem, getCoachDetails } = require('../lib/webflow');
 
 const stripe = getStripeClient();
 const logger = createLogger('checkout-details');

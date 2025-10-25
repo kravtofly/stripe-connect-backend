@@ -1,8 +1,8 @@
 // /api/stripe-webhook.js
-const { getStripeClient } = require('./lib/stripe');
-const { createLogger } = require('./lib/logger');
-const { HTTP_STATUS, STRIPE_EVENTS, CHECKOUT_FIELDS } = require('./lib/constants');
-const { requireEnv } = require('./lib/validation');
+const { getStripeClient } = require('../lib/stripe');
+const { createLogger } = require('../lib/logger');
+const { HTTP_STATUS, STRIPE_EVENTS, CHECKOUT_FIELDS } = require('../lib/constants');
+const { requireEnv } = require('../lib/validation');
 
 const stripe = getStripeClient();
 const logger = createLogger('stripe-webhook');

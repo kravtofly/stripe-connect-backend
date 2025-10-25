@@ -1,10 +1,10 @@
 // /api/create-checkout.js
-const { getStripeClient } = require('./lib/stripe');
-const { withCors } = require('./lib/cors');
-const { requireAuth } = require('./lib/auth');
-const { createLogger } = require('./lib/logger');
-const { withErrorHandling } = require('./lib/errors');
-const { ValidationError, NotFoundError, ConflictError } = require('./lib/errors');
+const { getStripeClient } = require('../lib/stripe');
+const { withCors } = require('../lib/cors');
+const { requireAuth } = require('../lib/auth');
+const { createLogger } = require('../lib/logger');
+const { withErrorHandling } = require('../lib/errors');
+const { ValidationError, NotFoundError, ConflictError } = require('../lib/errors');
 const {
   HTTP_STATUS,
   CURRENCY,
@@ -12,9 +12,9 @@ const {
   METADATA_KEYS,
   CHECKOUT_FIELDS,
   DEFAULTS
-} = require('./lib/constants');
-const { requireEnv, getEnv, isValidEmail } = require('./lib/validation');
-const { getLabById, getLabBySlug, getCoachStripeAccountId } = require('./lib/webflow');
+} = require('../lib/constants');
+const { requireEnv, getEnv, isValidEmail } = require('../lib/validation');
+const { getLabById, getLabBySlug, getCoachStripeAccountId } = require('../lib/webflow');
 
 const stripe = getStripeClient();
 const logger = createLogger('create-checkout');

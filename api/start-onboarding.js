@@ -1,17 +1,17 @@
 // /api/start-onboarding.js
-const { getStripeClient } = require('./lib/stripe');
-const { withCors } = require('./lib/cors');
-const { createLogger } = require('./lib/logger');
+const { getStripeClient } = require('../lib/stripe');
+const { withCors } = require('../lib/cors');
+const { createLogger } = require('../lib/logger');
 const {
   isValidEmail,
   isValidCountryCode,
   validateName,
   validateRequiredFields,
   sanitizeString
-} = require('./lib/validation');
-const { withErrorHandling, ValidationError } = require('./lib/errors');
-const { withRateLimit } = require('./lib/rateLimit');
-const { requireAuth } = require('./lib/auth');
+} = require('../lib/validation');
+const { withErrorHandling, ValidationError } = require('../lib/errors');
+const { withRateLimit } = require('../lib/rateLimit');
+const { requireAuth } = require('../lib/auth');
 const {
   STRIPE_ACCOUNT_TYPE,
   STRIPE_CAPABILITIES,
@@ -19,8 +19,8 @@ const {
   STRIPE_BUSINESS_TYPE,
   DEFAULTS,
   HTTP_STATUS
-} = require('./lib/constants');
-const { getConfig } = require('./lib/config');
+} = require('../lib/constants');
+const { getConfig } = require('../lib/config');
 
 const logger = createLogger('start-onboarding');
 const stripe = getStripeClient();

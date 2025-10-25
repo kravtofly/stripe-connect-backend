@@ -1,12 +1,12 @@
 // /api/create-refresh-link.js
-const { getStripeClient } = require('./lib/stripe');
-const { withCors } = require('./lib/cors');
-const { requireAuth } = require('./lib/auth');
-const { createLogger } = require('./lib/logger');
-const { withErrorHandling } = require('./lib/errors');
-const { ValidationError } = require('./lib/errors');
-const { HTTP_STATUS, STRIPE_ACCOUNT_LINK_TYPE } = require('./lib/constants');
-const { validateRequiredFields, isValidStripeAccountId, requireEnv } = require('./lib/validation');
+const { getStripeClient } = require('../lib/stripe');
+const { withCors } = require('../lib/cors');
+const { requireAuth } = require('../lib/auth');
+const { createLogger } = require('../lib/logger');
+const { withErrorHandling } = require('../lib/errors');
+const { ValidationError } = require('../lib/errors');
+const { HTTP_STATUS, STRIPE_ACCOUNT_LINK_TYPE } = require('../lib/constants');
+const { validateRequiredFields, isValidStripeAccountId, requireEnv } = require('../lib/validation');
 
 const stripe = getStripeClient();
 const logger = createLogger('create-refresh-link');

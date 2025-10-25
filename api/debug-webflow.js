@@ -1,12 +1,12 @@
 // /api/debug-webflow.js
 // Lists slugs from your Flight Labs collection so we can verify
-const { withCors } = require('./lib/cors');
-const { createLogger } = require('./lib/logger');
-const { withErrorHandling } = require('./lib/errors');
-const { ValidationError } = require('./lib/errors');
-const { HTTP_STATUS, LIMITS, WEBFLOW_FIELDS } = require('./lib/constants');
-const { requireEnv, getEnv } = require('./lib/validation');
-const { listWebflowItems } = require('./lib/webflow');
+const { withCors } = require('../lib/cors');
+const { createLogger } = require('../lib/logger');
+const { withErrorHandling } = require('../lib/errors');
+const { ValidationError } = require('../lib/errors');
+const { HTTP_STATUS, LIMITS, WEBFLOW_FIELDS } = require('../lib/constants');
+const { requireEnv, getEnv } = require('../lib/validation');
+const { listWebflowItems } = require('../lib/webflow');
 
 const logger = createLogger('debug-webflow');
 

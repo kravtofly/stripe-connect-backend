@@ -4,10 +4,10 @@
 // Optional token protection via HMAC (see ENV below).
 
 const crypto = require("crypto");
-const { createLogger } = require('./lib/logger');
-const { getWebflowItem } = require('./lib/webflow');
-const { HTTP_STATUS, WEBFLOW_FIELDS } = require('./lib/constants');
-const { requireEnv, getEnv } = require('./lib/validation');
+const { createLogger } = require('../lib/logger');
+const { getWebflowItem } = require('../lib/webflow');
+const { HTTP_STATUS, WEBFLOW_FIELDS } = require('../lib/constants');
+const { requireEnv, getEnv } = require('../lib/validation');
 
 const logger = createLogger('ics');
 

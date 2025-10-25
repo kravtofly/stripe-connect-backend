@@ -1,12 +1,12 @@
 // /api/debug-coach.js
 // Debug endpoint to inspect coach Stripe account ID field mappings
-const { withCors } = require('./lib/cors');
-const { createLogger } = require('./lib/logger');
-const { withErrorHandling } = require('./lib/errors');
-const { ValidationError, NotFoundError } = require('./lib/errors');
-const { HTTP_STATUS, WEBFLOW_FIELDS, STRIPE_FIELD_NAMES } = require('./lib/constants');
-const { requireEnv } = require('./lib/validation');
-const { getWebflowItem, getCoachStripeAccountId } = require('./lib/webflow');
+const { withCors } = require('../lib/cors');
+const { createLogger } = require('../lib/logger');
+const { withErrorHandling } = require('../lib/errors');
+const { ValidationError, NotFoundError } = require('../lib/errors');
+const { HTTP_STATUS, WEBFLOW_FIELDS, STRIPE_FIELD_NAMES } = require('../lib/constants');
+const { requireEnv } = require('../lib/validation');
+const { getWebflowItem, getCoachStripeAccountId } = require('../lib/webflow');
 
 const logger = createLogger('debug-coach');
 
