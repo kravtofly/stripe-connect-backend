@@ -1,59 +1,74 @@
-const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
+// /api/create-refresh-link.js
+const { getStripeClient } = require('../lib/stripe');
+const { withCors } = require('../lib/cors');
+const { requireAuth } = require('../lib/auth');
+const { createLogger } = require('../lib/logger');
+const { withErrorHandling } = require('../lib/errors');
+const { ValidationError } = require('../lib/errors');
+const { HTTP_STATUS, STRIPE_ACCOUNT_LINK_TYPE } = require('../lib/constants');
+const { validateRequiredFields, isValidStripeAccountId, requireEnv } = require('../lib/validation');
+
+const stripe = getStripeClient();
+const logger = createLogger('create-refresh-link');
 
 /**
  * POST /api/create-refresh-link
  *
  * Creates a new Stripe onboarding link for an existing connected account.
  * This is useful if a coach abandons the onboarding flow and needs to resume
- * later.  Requires the `accountId` and the coach’s Memberstack ID (`coachId`).
+ * later. Requires the `accountId` and the coach's Memberstack ID (`coachId`).
  */
-module.exports = async function handler(req, res) {
-  // Enable CORS
-  res.setHeader('Access-Control-Allow-Origin', 'https://www.kravtofly.com');
-  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-
-  if (req.method === 'OPTIONS') {
-    res.status(200).end();
-    return;
-  }
-
+async function handler(req, res) {
   if (req.method !== 'POST') {
-    return res.status(405).json({
+    res.setHeader('Allow', 'POST, OPTIONS');
+    return res.status(HTTP_STATUS.METHOD_NOT_ALLOWED).json({
       success: false,
       error: 'Method not allowed'
     });
   }
 
-  try {
-    const { accountId, coachId } = req.body;
+  const { accountId, coachId } = req.body;
 
-    if (!accountId || !coachId) {
-      return res.status(400).json({
-        success: false,
-        error: 'Missing required fields: accountId, coachId'
-      });
-    }
-
-    console.log(`Creating refresh link for account: ${accountId}`);
-
-    // Create new onboarding link
-    const accountLink = await stripe.accountLinks.create({
-      account: accountId,
-      refresh_url: `${process.env.WEBFLOW_DOMAIN}/coach-onboarding-refresh?coach_id=${coachId}&account_id=${accountId}`,
-      return_url: `${process.env.WEBFLOW_DOMAIN}/coach-onboarding-success?coach_id=${coachId}&account_id=${accountId}`,
-      type: 'account_onboarding'
-    });
-
-    return res.json({
-      success: true,
-      onboardingUrl: accountLink.url
-    });
-  } catch (error) {
-    console.error('Error creating refresh link:', error);
-    return res.status(400).json({
-      success: false,
-      error: error.message || 'Failed to create refresh link'
-    });
+  // Validate required fields
+  const missing = validateRequiredFields(req.body, ['accountId', 'coachId']);
+  if (missing.length > 0) {
+    throw new ValidationError(`Missing required fields: ${missing.join(', ')}`);
   }
-};
+
+  // Validate Stripe account ID format
+  if (!isValidStripeAccountId(accountId)) {
+    throw new ValidationError('Invalid Stripe account ID format');
+  }
+
+  logger.info('Creating refresh link', { accountId, coachId });
+
+  const webflowDomain = requireEnv('WEBFLOW_DOMAIN');
+
+  // Create new onboarding link
+  const accountLink = await stripe.accountLinks.create({
+    account: accountId,
+    refresh_url: `${webflowDomain}/coach-onboarding-refresh?coach_id=${coachId}&account_id=${accountId}`,
+    return_url: `${webflowDomain}/coach-onboarding-success?coach_id=${coachId}&account_id=${accountId}`,
+    type: STRIPE_ACCOUNT_LINK_TYPE.ONBOARDING
+  });
+
+  logger.info('Refresh link created', {
+    accountId,
+    coachId,
+    url: accountLink.url
+  });
+
+  return res.status(HTTP_STATUS.OK).json({
+    success: true,
+    onboardingUrl: accountLink.url
+  });
+}
+
+module.exports = withCors(
+  requireAuth(
+    withErrorHandling(handler)
+  ),
+  {
+    methods: ['POST', 'OPTIONS']
+  }
+);

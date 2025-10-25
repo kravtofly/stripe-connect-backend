@@ -1,8 +1,26 @@
 {
   "name": "stripe-connect-backend",
-  "version": "1.0.0",
+  "version": "2.0.0",
+  "description": "Secure Stripe Connect backend for Krav Flight Labs with comprehensive security fixes",
+  "private": true,
+  "engines": {
+    "node": ">=18.0.0"
+  },
   "dependencies": {
     "stripe": "^14.0.0",
     "@memberstack/admin": "^1.0.0"
-  }
+  },
+  "scripts": {
+    "test": "echo \"No tests specified yet\"",
+    "dev": "vercel dev"
+  },
+  "keywords": [
+    "stripe",
+    "stripe-connect",
+    "payments",
+    "vercel",
+    "serverless"
+  ],
+  "author": "Krav Flight Labs",
+  "license": "UNLICENSED"
 }

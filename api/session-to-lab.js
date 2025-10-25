@@ -1,41 +1,68 @@
 // /api/session-to-lab.js
-const Stripe = require('stripe');
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
+const { getStripeClient } = require('../lib/stripe');
+const { withCors } = require('../lib/cors');
+const { createLogger } = require('../lib/logger');
+const { withErrorHandling } = require('../lib/errors');
+const { ValidationError, NotFoundError } = require('../lib/errors');
+const { HTTP_STATUS, METADATA_KEYS } = require('../lib/constants');
+const { isValidStripeSessionId } = require('../lib/validation');
 
-/* CORS (reuse your helper pattern) */
-const ORIGINS = (process.env.ALLOWED_ORIGINS || '')
-  .split(',').map(s => s.trim()).filter(Boolean);
-function setCors(req, res) {
-  const origin = req.headers.origin;
-  const allow = (origin && ORIGINS.includes(origin)) ? origin : '*'; // allow GETs broadly
-  res.setHeader('Access-Control-Allow-Origin', allow);
-  res.setHeader('Vary', 'Origin');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+const stripe = getStripeClient();
+const logger = createLogger('session-to-lab');
+
+/**
+ * GET /api/session-to-lab
+ *
+ * Looks up a Stripe Checkout Session and returns the associated Flight Lab ID
+ * from the session metadata. This is useful for redirecting users to the correct
+ * lab page after checkout.
+ *
+ * Query parameters:
+ * - session_id: The Stripe Checkout Session ID
+ */
+async function handler(req, res) {
+  if (req.method !== 'GET') {
+    res.setHeader('Allow', 'GET, OPTIONS');
+    return res.status(HTTP_STATUS.METHOD_NOT_ALLOWED).json({
+      error: 'Method not allowed'
+    });
+  }
+
+  const sessionId = (req.query.session_id || '').trim();
+
+  if (!sessionId) {
+    throw new ValidationError('Missing session_id parameter');
+  }
+
+  // Validate session ID format
+  if (!isValidStripeSessionId(sessionId)) {
+    throw new ValidationError('Invalid session ID format');
+  }
+
+  logger.info('Looking up lab ID for session', { sessionId });
+
+  const session = await stripe.checkout.sessions.retrieve(sessionId);
+  const metadata = session?.metadata || {};
+
+  // Try multiple metadata key variations for compatibility
+  const labId = metadata[METADATA_KEYS.FLIGHT_LAB_ID]
+    || metadata[METADATA_KEYS.LAB_ID]
+    || metadata[METADATA_KEYS.FLIGHT_LAB_ID_CAMEL]
+    || null;
+
+  if (!labId) {
+    logger.warn('Lab ID not found in session metadata', {
+      sessionId,
+      metadataKeys: Object.keys(metadata)
+    });
+    throw new NotFoundError('Lab ID in session metadata');
+  }
+
+  logger.info('Lab ID found', { sessionId, labId });
+
+  return res.status(HTTP_STATUS.OK).json({ labId });
 }
 
-module.exports = async function handler(req, res) {
-  if (req.method === 'OPTIONS') { setCors(req, res); return res.status(204).end(); }
-  if (req.method !== 'GET') {
-    setCors(req, res); res.setHeader('Allow', 'GET, OPTIONS');
-    return res.status(405).send('Method Not Allowed');
-  }
-
-  try {
-    const sessionId = (req.query.session_id || '').trim();
-    if (!sessionId) { setCors(req, res); return res.status(400).json({ error: 'Missing session_id' }); }
-
-    const sess = await stripe.checkout.sessions.retrieve(sessionId);
-    const md = sess?.metadata || {};
-    const labId = md.flight_lab_id || md.lab_id || md.flightLabId || null;
-
-    if (!labId) { setCors(req, res); return res.status(404).json({ error: 'labId not found on session' }); }
-
-    setCors(req, res);
-    return res.status(200).json({ labId });
-  } catch (err) {
-    console.error('session-to-lab error:', err);
-    setCors(req, res);
-    return res.status(500).json({ error: 'Lookup failed' });
-  }
-};
+module.exports = withErrorHandling(withCors(handler, {
+  methods: ['GET', 'OPTIONS']
+}));

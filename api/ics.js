@@ -4,23 +4,31 @@
 // Optional token protection via HMAC (see ENV below).
 
 const crypto = require("crypto");
+const { createLogger } = require('../lib/logger');
+const { getWebflowItem } = require('../lib/webflow');
+const { HTTP_STATUS, WEBFLOW_FIELDS } = require('../lib/constants');
+const { requireEnv, getEnv } = require('../lib/validation');
+
+const logger = createLogger('ics');
 
 // -------- ENV you should set in Vercel --------
 // WEBFLOW_TOKEN=  (Private access token)
 // WEBFLOW_COLLECTION_ID=  (Flight Labs collection ID)
 // ICS_REQUIRE_TOKEN=true|false   (default false)
 // ICS_HMAC_SECRET=  (if ICS_REQUIRE_TOKEN=true)
-const {
-  WEBFLOW_TOKEN,
-  WEBFLOW_COLLECTION_ID,
-  ICS_REQUIRE_TOKEN = "false",
-  ICS_HMAC_SECRET,
-} = process.env;
 
-module.exports = async function handler(req, res) {
+/**
+ * GET /api/ics
+ *
+ * Generates an ICS calendar file for a Flight Lab.
+ * Supports two modes:
+ * 1. Webflow fetch: ?lab=<itemId>&t=<token>
+ * 2. Quick-start: ?name=&meet=&url=&sessions=<base64url(JSON)>&t=<token>
+ */
+async function handler(req, res) {
   if (req.method !== "GET") {
     res.setHeader("Allow", "GET");
-    return res.status(405).send("Method Not Allowed");
+    return res.status(HTTP_STATUS.METHOD_NOT_ALLOWED).send("Method Not Allowed");
   }
 
   try {
@@ -29,20 +37,29 @@ module.exports = async function handler(req, res) {
     // - (quick start) ?name=&meet=&url=&sessions=<base64url(JSON[{start,end}])>
     const { lab, t, name, meet, url, sessions } = req.query;
 
-    if (ICS_REQUIRE_TOKEN === "true") {
-      if (!t) return res.status(401).send("Missing token");
-      if (!verifyToken(t)) return res.status(401).send("Invalid token");
+    const requireToken = getEnv('ICS_REQUIRE_TOKEN', 'false');
+    if (requireToken === "true") {
+      if (!t) {
+        logger.warn('ICS request missing token');
+        return res.status(HTTP_STATUS.UNAUTHORIZED).send("Missing token");
+      }
+      if (!verifyToken(t)) {
+        logger.warn('ICS request with invalid token');
+        return res.status(HTTP_STATUS.UNAUTHORIZED).send("Invalid token");
+      }
     }
 
     let labData;
 
     if (lab) {
+      logger.info('Fetching lab from Webflow', { labId: lab });
       labData = await fetchLabFromWebflow(lab);
     } else if (name && sessions) {
+      logger.info('Using quick-start mode', { name });
       // Quick-start (no Webflow fetch): build from query
       const sessionsArr = safeParseBase64urlJson(sessions);
       if (!Array.isArray(sessionsArr)) {
-        return res.status(400).send("Invalid sessions payload");
+        return res.status(HTTP_STATUS.BAD_REQUEST).send("Invalid sessions payload");
       }
       labData = {
         name,
@@ -52,13 +69,19 @@ module.exports = async function handler(req, res) {
       };
     } else {
       return res
-        .status(400)
+        .status(HTTP_STATUS.BAD_REQUEST)
         .send("Provide ?lab=<itemId> or quick-start params (?name&sessions=base64url)");
     }
 
     if (!labData || !Array.isArray(labData.sessions) || labData.sessions.length === 0) {
-      return res.status(404).send("No sessions found for this lab");
+      logger.warn('No sessions found for lab', { lab, name });
+      return res.status(HTTP_STATUS.NOT_FOUND).send("No sessions found for this lab");
     }
+
+    logger.info('Generating ICS file', {
+      labName: labData.name,
+      sessionCount: labData.sessions.length
+    });
 
     const ics = buildICS(labData);
 
@@ -70,13 +93,16 @@ module.exports = async function handler(req, res) {
       "Content-Disposition",
       `attachment; filename="${fileName}"`
     );
+
+    logger.info('ICS file generated successfully', { fileName });
+
     // Important: ICS prefers CRLF line endings
-    return res.status(200).send(ics);
+    return res.status(HTTP_STATUS.OK).send(ics);
   } catch (err) {
-    console.error("ICS error:", err);
-    return res.status(500).send("Internal Server Error");
+    logger.error('ICS generation error', err);
+    return res.status(HTTP_STATUS.INTERNAL_SERVER_ERROR).send("Internal Server Error");
   }
-};
+}
 
 // ---------- Helpers ----------
 
@@ -97,7 +123,7 @@ function escICS(s = "") {
 
 function foldLine(line) {
   // Optional folding at 75 octets; many clients work without this,
-  // but it’s safer to fold long DESCRIPTION/URL lines.
+  // but it's safer to fold long DESCRIPTION/URL lines.
   if (!line) return "";
   const chunks = [];
   let i = 0;
@@ -124,7 +150,7 @@ function buildICS({ name, googleMeetUrl, labUrl, sessions }) {
       const dtEnd = toICSDate(s.end);
       const uid = `${slugify(name)}-${idx}@krav.to`;
 
-      const summary = `SUMMARY:${foldLine(escICS(`${name} with Coach`))}`; // You can swap in coach name if you store it
+      const summary = `SUMMARY:${foldLine(escICS(`${name} with Coach`))}`;
       const description = [
         `DESCRIPTION:${foldLine(escICS(`Join link: ${googleMeetUrl || ""}`))}`,
         labUrl ? ` ${foldLine(escICS(`Lab page: ${labUrl}`))}` : "",
@@ -142,12 +168,6 @@ function buildICS({ name, googleMeetUrl, labUrl, sessions }) {
         description,
         `LOCATION:${foldLine(escICS(googleMeetUrl ? "Google Meet" : ""))}`,
         labUrl ? `URL:${foldLine(escICS(labUrl))}` : "",
-        // Optional: built-in reminders
-        // "BEGIN:VALARM",
-        // "TRIGGER:-PT24H",
-        // "ACTION:DISPLAY",
-        // "DESCRIPTION:Upcoming Krāv Flight Lab",
-        // "END:VALARM",
         "END:VEVENT",
       ].join("\r\n");
     })
@@ -178,16 +198,20 @@ function verifyToken(token) {
   // Token format: base64url(payload).base64url(signature)
   // signature = HMAC_SHA256(base64url(payload), ICS_HMAC_SECRET)
   try {
-    if (!ICS_HMAC_SECRET) return false;
+    const secret = process.env.ICS_HMAC_SECRET;
+    if (!secret) return false;
+
     const [payloadB64u, sigB64u] = token.split(".");
     if (!payloadB64u || !sigB64u) return false;
+
     const expected = crypto
-      .createHmac("sha256", ICS_HMAC_SECRET)
+      .createHmac("sha256", secret)
       .update(payloadB64u)
       .digest("base64")
       .replace(/\+/g, "-")
       .replace(/\//g, "_")
       .replace(/=+$/, "");
+
     return crypto.timingSafeEqual(Buffer.from(sigB64u), Buffer.from(expected));
   } catch {
     return false;
@@ -195,27 +219,15 @@ function verifyToken(token) {
 }
 
 async function fetchLabFromWebflow(itemId) {
-  // Adjust field keys to your CMS schema
-  const url = `https://api.webflow.com/v2/collections/${WEBFLOW_COLLECTION_ID}/items/${itemId}`;
-  const r = await fetch(url, {
-    headers: {
-      Authorization: `Bearer ${WEBFLOW_TOKEN}`,
-      Accept: "application/json",
-    },
-  });
-  if (!r.ok) {
-    const t = await r.text();
-    throw new Error(`Webflow fetch failed: ${r.status} ${t}`);
-  }
-  const data = await r.json();
+  const collectionId = requireEnv('WEBFLOW_COLLECTION_ID');
+  const data = await getWebflowItem(collectionId, itemId);
 
   // v2 response typically: { item: { fieldData: {...} } }
-  const item = data.item || data; // fallback if shape differs
-  const f = item.fieldData || item; // fallback
+  const item = data.item || data;
+  const f = item.fieldData || item;
 
-  // Map your field API names here:
-  // e.g., f["name"], f["google-meet-url"], f["sessions-json"], f["lab-url"]
-  const sessionsRaw = f["sessions-json"];
+  // Map field API names
+  const sessionsRaw = f[WEBFLOW_FIELDS.SESSIONS_JSON];
   let sessions = sessionsRaw;
   if (typeof sessionsRaw === "string") {
     try {
@@ -226,9 +238,11 @@ async function fetchLabFromWebflow(itemId) {
   }
 
   return {
-    name: f["name"] || "Flight Lab",
-    googleMeetUrl: f["google-meet-url"] || "",
-    labUrl: f["lab-url"] || "",
+    name: f[WEBFLOW_FIELDS.NAME] || "Flight Lab",
+    googleMeetUrl: f[WEBFLOW_FIELDS.GOOGLE_MEET_URL] || "",
+    labUrl: f[WEBFLOW_FIELDS.LAB_URL] || "",
     sessions: Array.isArray(sessions) ? sessions : [],
   };
 }
+
+module.exports = handler;

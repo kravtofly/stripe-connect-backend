@@ -1,73 +1,93 @@
 // /api/debug-coach.js
-const ORIGINS = (process.env.ALLOWED_ORIGINS || '')
-  .split(',').map(s => s.trim()).filter(Boolean);
+// Debug endpoint to inspect coach Stripe account ID field mappings
+const { withCors } = require('../lib/cors');
+const { createLogger } = require('../lib/logger');
+const { withErrorHandling } = require('../lib/errors');
+const { ValidationError, NotFoundError } = require('../lib/errors');
+const { HTTP_STATUS, WEBFLOW_FIELDS, STRIPE_FIELD_NAMES } = require('../lib/constants');
+const { requireEnv } = require('../lib/validation');
+const { getWebflowItem, getCoachStripeAccountId } = require('../lib/webflow');
 
-function setCors(req, res) {
-  const origin = req.headers.origin;
-  if (origin && ORIGINS.includes(origin)) res.setHeader('Access-Control-Allow-Origin', origin);
-  else if (ORIGINS.length) res.setHeader('Access-Control-Allow-Origin', ORIGINS[0]);
-  res.setHeader('Vary', 'Origin');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-}
+const logger = createLogger('debug-coach');
 
-async function wfFetch(url) {
-  const r = await fetch(url, {
-    headers: { Authorization: `Bearer ${process.env.WEBFLOW_TOKEN}`, 'Content-Type': 'application/json' },
-  });
-  const txt = await r.text();
-  if (!r.ok) throw new Error(`Webflow ${url} -> ${r.status}: ${txt}`);
-  return JSON.parse(txt);
-}
+/**
+ * GET /api/debug-coach
+ *
+ * Debug endpoint to inspect a coach's Stripe account ID configuration.
+ * Useful for verifying field mappings and troubleshooting Connect issues.
+ *
+ * Query parameters:
+ * - id or coachId: The Webflow coach item ID
+ * - labId: Optional - fetch coach from a lab's coach reference
+ */
+async function handler(req, res) {
+  if (req.method !== 'GET') {
+    res.setHeader('Allow', 'GET, OPTIONS');
+    return res.status(HTTP_STATUS.METHOD_NOT_ALLOWED).json({
+      error: 'Method not allowed'
+    });
+  }
 
-module.exports = async function handler(req, res) {
-  if (req.method === 'OPTIONS') { setCors(req, res); return res.status(204).end(); }
-  if (req.method !== 'GET')     { setCors(req, res); return res.status(405).json({ error: 'GET only' }); }
+  const coachCollectionId = requireEnv('COACH_COLLECTION_ID');
+  const labCollectionId = requireEnv('WEBFLOW_COLLECTION_ID');
 
-  try {
-    setCors(req, res);
+  const { id, coachId, labId } = req.query;
+  let resolvedCoachId = id || coachId || null;
 
-    const coachCollectionId = process.env.COACH_COLLECTION_ID;
-    const labCollectionId   = process.env.WEBFLOW_COLLECTION_ID;
-    if (!coachCollectionId) return res.status(400).json({ error: 'Missing COACH_COLLECTION_ID' });
+  // If labId provided, fetch coach reference from lab
+  if (!resolvedCoachId && labId) {
+    logger.info('Fetching coach from lab', { labId });
 
-    const { id, coachId, labId } = req.query;
-    let resolvedCoachId = id || coachId || null;
-
-    if (!resolvedCoachId && labId) {
-      const lab = await wfFetch(`https://api.webflow.com/v2/collections/${labCollectionId}/items/${labId}`);
-      const f = lab?.fieldData || {};
-      resolvedCoachId = f['coach'] || null;
-      if (!resolvedCoachId) {
-        return res.status(404).json({ error: 'Lab found, but no coach reference on this lab', labId, labFieldKeys: Object.keys(f) });
-      }
-    }
+    const lab = await getWebflowItem(labCollectionId, labId);
+    const f = lab?.item?.fieldData || lab?.fieldData || {};
+    resolvedCoachId = f[WEBFLOW_FIELDS.COACH] || null;
 
     if (!resolvedCoachId) {
-      return res.status(400).json({ error: 'Pass ?id=<coachItemId> or ?labId=<flightLabItemId>' });
+      logger.warn('Lab found but no coach reference', { labId });
+      return res.status(HTTP_STATUS.NOT_FOUND).json({
+        error: 'Lab found, but no coach reference on this lab',
+        labId,
+        labFieldKeys: Object.keys(f)
+      });
     }
-
-    const coach = await wfFetch(`https://api.webflow.com/v2/collections/${coachCollectionId}/items/${resolvedCoachId}`);
-    const f = coach?.fieldData || {};
-
-    const candidates = {
-      'coach-stripe-account-id': f['coach-stripe-account-id'],
-      'stripe-account-id':       f['stripe-account-id'],
-      'coach_stripe_account_id': f['coach_stripe_account_id'],
-      'stripe_account_id':       f['stripe_account_id'],
-    };
-    const found = Object.values(candidates).find(v => typeof v === 'string' && v.startsWith('acct_')) || null;
-
-    return res.status(200).json({
-      coachItemId: coach.id,
-      candidates,
-      found,
-      fieldKeys: Object.keys(f),
-      name: f['name'] || null,
-      email: f['email-field'] || null,
-    });
-  } catch (e) {
-    setCors(req, res);
-    return res.status(500).json({ error: String(e.message || e) });
   }
-};
+
+  if (!resolvedCoachId) {
+    throw new ValidationError('Pass ?id=<coachItemId> or ?labId=<flightLabItemId>');
+  }
+
+  logger.info('Fetching coach details', { coachId: resolvedCoachId });
+
+  const coach = await getWebflowItem(coachCollectionId, resolvedCoachId);
+  const f = coach?.item?.fieldData || coach?.fieldData || {};
+
+  // Check all possible field name variations
+  const candidates = {
+    [STRIPE_FIELD_NAMES.COACH_STRIPE_ACCOUNT_ID]: f[STRIPE_FIELD_NAMES.COACH_STRIPE_ACCOUNT_ID],
+    [STRIPE_FIELD_NAMES.STRIPE_ACCOUNT_ID]: f[STRIPE_FIELD_NAMES.STRIPE_ACCOUNT_ID],
+    [STRIPE_FIELD_NAMES.COACH_STRIPE_ACCOUNT_ID_UNDERSCORE]: f[STRIPE_FIELD_NAMES.COACH_STRIPE_ACCOUNT_ID_UNDERSCORE],
+    [STRIPE_FIELD_NAMES.STRIPE_ACCOUNT_ID_UNDERSCORE]: f[STRIPE_FIELD_NAMES.STRIPE_ACCOUNT_ID_UNDERSCORE],
+  };
+
+  const found = Object.values(candidates).find(v => typeof v === 'string' && v.startsWith('acct_')) || null;
+
+  const response = {
+    coachItemId: coach?.item?.id || coach?.id,
+    candidates,
+    found,
+    fieldKeys: Object.keys(f),
+    name: f[WEBFLOW_FIELDS.NAME] || null,
+    email: f[WEBFLOW_FIELDS.EMAIL_FIELD] || null,
+  };
+
+  logger.info('Coach debug info retrieved', {
+    coachId: resolvedCoachId,
+    hasStripeAccount: !!found
+  });
+
+  return res.status(HTTP_STATUS.OK).json(response);
+}
+
+module.exports = withErrorHandling(withCors(handler, {
+  methods: ['GET', 'OPTIONS']
+}));

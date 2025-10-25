@@ -1,5 +1,11 @@
 // /api/stripe-webhook.js
-const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
+const { getStripeClient } = require('../lib/stripe');
+const { createLogger } = require('../lib/logger');
+const { HTTP_STATUS, STRIPE_EVENTS, CHECKOUT_FIELDS } = require('../lib/constants');
+const { requireEnv } = require('../lib/validation');
+
+const stripe = getStripeClient();
+const logger = createLogger('stripe-webhook');
 
 // Read the raw body (required for Stripe signature verification)
 async function getRawBody(req) {
@@ -11,29 +17,44 @@ async function getRawBody(req) {
   });
 }
 
-module.exports = async function handler(req, res) {
+/**
+ * POST /api/stripe-webhook
+ *
+ * Receives and processes Stripe webhook events. Currently handles:
+ * - checkout.session.completed: Forwards to Make.com for automation
+ *
+ * IMPORTANT: Returns 500 on Make.com forward failure to trigger Stripe retry.
+ * This ensures events aren't lost if the automation service is down.
+ */
+async function handler(req, res) {
   if (req.method !== 'POST') {
     res.setHeader('Allow', 'POST');
-    return res.status(405).send('Method Not Allowed');
+    return res.status(HTTP_STATUS.METHOD_NOT_ALLOWED).send('Method Not Allowed');
   }
 
   const sig = req.headers['stripe-signature'];
-  if (!sig) return res.status(400).send('Missing stripe-signature header');
+  if (!sig) {
+    logger.warn('Missing Stripe signature header');
+    return res.status(HTTP_STATUS.BAD_REQUEST).send('Missing stripe-signature header');
+  }
+
+  const webhookSecret = requireEnv('STRIPE_WEBHOOK_SECRET');
 
   let event;
   try {
-    const rawBody = await getRawBody(req); // RAW Buffer
-    event = stripe.webhooks.constructEvent(
-      rawBody,
-      sig,
-      process.env.STRIPE_WEBHOOK_SECRET
-    );
+    const rawBody = await getRawBody(req);
+    event = stripe.webhooks.constructEvent(rawBody, sig, webhookSecret);
   } catch (err) {
-    console.error('Webhook signature verification failed:', err.message);
-    return res.status(400).send(`Webhook Error: ${err.message}`);
+    logger.error('Webhook signature verification failed', err);
+    return res.status(HTTP_STATUS.BAD_REQUEST).send(`Webhook Error: ${err.message}`);
   }
 
-  if (event.type === 'checkout.session.completed') {
+  logger.info('Webhook event received', {
+    event_id: event.id,
+    event_type: event.type
+  });
+
+  if (event.type === STRIPE_EVENTS.CHECKOUT_SESSION_COMPLETED) {
     const session = event.data.object;
 
     // Try to expand line items (optional)
@@ -43,10 +64,13 @@ module.exports = async function handler(req, res) {
         expand: ['line_items'],
       });
     } catch (e) {
-      console.error('Failed to retrieve session with expand:', e);
+      logger.warn('Failed to retrieve session with expand', {
+        session_id: session.id,
+        error: e.message
+      });
     }
 
-    // Build a clean payload for Make
+    // Build a clean payload for Make.com
     const payload = {
       event_id: event.id,
       event_type: event.type,
@@ -74,34 +98,69 @@ module.exports = async function handler(req, res) {
       },
     };
 
-    // Forward to Make (non-blocking; Stripe will retry if we return >= 400)
+    logger.info('Forwarding event to Make.com', {
+      event_id: event.id,
+      session_id: full.id
+    });
+
+    // Forward to Make.com
+    // CRITICAL FIX: Return 500 on failure (not 202) to trigger Stripe retry
     try {
-      const resp = await fetch(process.env.MAKE_WEBHOOK_URL, {
+      const makeWebhookUrl = requireEnv('MAKE_WEBHOOK_URL');
+      const makeSecret = process.env.MAKE_FORWARDING_SECRET || '';
+
+      const resp = await fetch(makeWebhookUrl, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'X-Bridge-Secret': process.env.MAKE_FORWARDING_SECRET || '',
+          'X-Bridge-Secret': makeSecret,
         },
         body: JSON.stringify(payload),
       });
 
       if (!resp.ok) {
         const text = await resp.text();
-        console.error('Forward to Make failed:', resp.status, text);
-        // Accept event so Stripe stops retrying; you can monitor forwarding failures in logs
-        return res.status(202).json({ received: true, forwarded: false });
+        logger.error('Make.com forward failed', {
+          event_id: event.id,
+          session_id: full.id,
+          status: resp.status,
+          response: text
+        });
+
+        // Return 500 to trigger Stripe retry
+        return res.status(HTTP_STATUS.INTERNAL_SERVER_ERROR).json({
+          received: true,
+          forwarded: false,
+          error: 'Failed to forward to automation service'
+        });
       }
+
+      logger.info('Event forwarded successfully', {
+        event_id: event.id,
+        session_id: full.id
+      });
     } catch (err) {
-      console.error('Error forwarding to Make:', err);
-      return res.status(202).json({ received: true, forwarded: false });
+      logger.error('Error forwarding to Make.com', err, {
+        event_id: event.id,
+        session_id: full.id
+      });
+
+      // Return 500 to trigger Stripe retry
+      return res.status(HTTP_STATUS.INTERNAL_SERVER_ERROR).json({
+        received: true,
+        forwarded: false,
+        error: 'Failed to forward to automation service'
+      });
     }
   }
 
-  // Always 200 (unless signature failed) so Stripe doesn’t keep retrying
-  return res.status(200).json({ received: true });
-};
+  // Success - Stripe won't retry
+  return res.status(HTTP_STATUS.OK).json({ received: true });
+}
 
-// ✅ CommonJS config for Vercel Serverless Functions (disables body parsing)
+module.exports = handler;
+
+// Vercel Serverless Functions config (disables body parsing)
 module.exports.config = {
   api: {
     bodyParser: false,
