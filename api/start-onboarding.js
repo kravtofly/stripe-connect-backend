@@ -11,6 +11,7 @@ const {
 } = require('./lib/validation');
 const { withErrorHandling, ValidationError } = require('./lib/errors');
 const { withRateLimit } = require('./lib/rateLimit');
+const { requireAuth } = require('./lib/auth');
 const {
   STRIPE_ACCOUNT_TYPE,
   STRIPE_CAPABILITIES,
@@ -151,11 +152,13 @@ async function handler(req, res) {
   });
 }
 
-// Apply middleware: error handling, rate limiting, CORS
+// Apply middleware: authentication, error handling, rate limiting, CORS
 module.exports = withCors(
-  withRateLimit(
-    withErrorHandling(handler),
-    { maxRequests: 10, windowMs: 60000 } // 10 requests per minute
+  requireAuth(
+    withRateLimit(
+      withErrorHandling(handler),
+      { maxRequests: 10, windowMs: 60000 } // 10 requests per minute
+    )
   ),
   { methods: ['POST', 'OPTIONS'] }
 );

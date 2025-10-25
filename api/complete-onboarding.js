@@ -1,6 +1,7 @@
 // /api/complete-onboarding.js
 const { getStripeClient } = require('./lib/stripe');
 const { withCors } = require('./lib/cors');
+const { requireAuth } = require('./lib/auth');
 const { createLogger } = require('./lib/logger');
 const { withErrorHandling } = require('./lib/errors');
 const { updateMemberStripeAccount, verifyMemberExists } = require('./lib/memberstack');
@@ -86,6 +87,11 @@ async function handler(req, res) {
   });
 }
 
-module.exports = withErrorHandling(withCors(handler, {
-  methods: ['POST', 'OPTIONS']
-}));
+module.exports = withCors(
+  requireAuth(
+    withErrorHandling(handler)
+  ),
+  {
+    methods: ['POST', 'OPTIONS']
+  }
+);
