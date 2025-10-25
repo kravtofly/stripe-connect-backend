@@ -1,74 +1,71 @@
 // /api/debug-webflow.js
 // Lists slugs from your Flight Labs collection so we can verify
-const ORIGINS = (process.env.ALLOWED_ORIGINS || '')
-  .split(',')
-  .map(s => s.trim())
-  .filter(Boolean);
+const { withCors } = require('./lib/cors');
+const { createLogger } = require('./lib/logger');
+const { withErrorHandling } = require('./lib/errors');
+const { ValidationError } = require('./lib/errors');
+const { HTTP_STATUS, LIMITS, WEBFLOW_FIELDS } = require('./lib/constants');
+const { requireEnv, getEnv } = require('./lib/validation');
+const { listWebflowItems } = require('./lib/webflow');
 
-function setCors(req, res) {
-  const origin = req.headers.origin;
-  if (origin && ORIGINS.includes(origin)) res.setHeader('Access-Control-Allow-Origin', origin);
-  else if (ORIGINS.length) res.setHeader('Access-Control-Allow-Origin', ORIGINS[0]);
-  res.setHeader('Vary', 'Origin');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-}
+const logger = createLogger('debug-webflow');
 
-async function wfFetch(url) {
-  const r = await fetch(url, {
-    headers: {
-      Authorization: `Bearer ${process.env.WEBFLOW_TOKEN}`,
-      'Content-Type': 'application/json',
-    },
-  });
-  if (!r.ok) {
-    const t = await r.text();
-    throw new Error(`Webflow ${url} -> ${r.status}: ${t}`);
-  }
-  return r.json();
-}
-
-module.exports = async function handler(req, res) {
-  if (req.method === 'OPTIONS') { setCors(req, res); return res.status(204).end(); }
-  try {
-    setCors(req, res);
-
-    const collectionId = process.env.WEBFLOW_COLLECTION_ID;
-    if (!collectionId) return res.status(400).json({ error: 'Missing WEBFLOW_COLLECTION_ID' });
-
-    const limit = Number(req.query.limit || 100);
-    const localeParam = process.env.WEBFLOW_CMS_LOCALE_ID
-      ? `&cmsLocaleId=${encodeURIComponent(process.env.WEBFLOW_CMS_LOCALE_ID)}`
-      : '';
-
-    let offset = 0;
-    const seen = [];
-    while (offset < 1000 && seen.length < limit) {
-      const url = `https://api.webflow.com/v2/collections/${collectionId}/items?limit=100&offset=${offset}${localeParam}`;
-      const data = await wfFetch(url);
-      const items = data.items || [];
-      items.forEach(it => {
-        seen.push({
-          id: it.id,
-          slug: it.slug,
-          name: it.fieldData?.name,
-          cmsLocaleId: it.cmsLocaleId || null,
-          published: it.isDraft === false && it.isArchived === false,
-        });
-      });
-      if (items.length < 100) break;
-      offset += 100;
-    }
-
-    return res.status(200).json({
-      count: seen.length,
-      collectionId,
-      cmsLocaleId: process.env.WEBFLOW_CMS_LOCALE_ID || null,
-      sample: seen.slice(0, limit),
+/**
+ * GET /api/debug-webflow
+ *
+ * Debug endpoint to list Flight Lab items from Webflow CMS.
+ * Useful for verifying collection ID, locale settings, and item slugs.
+ *
+ * Query parameters:
+ * - limit: Maximum number of items to return (default: 100)
+ */
+async function handler(req, res) {
+  if (req.method !== 'GET') {
+    res.setHeader('Allow', 'GET, OPTIONS');
+    return res.status(HTTP_STATUS.METHOD_NOT_ALLOWED).json({
+      error: 'Method not allowed'
     });
-  } catch (e) {
-    console.error('debug-webflow error:', e);
-    setCors(req, res);
-    return res.status(500).json({ error: String(e.message || e) });
   }
-};
+
+  const collectionId = requireEnv('WEBFLOW_COLLECTION_ID');
+  const cmsLocaleId = getEnv('WEBFLOW_CMS_LOCALE_ID', null);
+  const limit = Number(req.query.limit || 100);
+
+  if (limit < 1 || limit > 1000) {
+    throw new ValidationError('Limit must be between 1 and 1000');
+  }
+
+  logger.info('Fetching Webflow items for debug', {
+    collectionId,
+    cmsLocaleId,
+    limit
+  });
+
+  const items = await listWebflowItems(collectionId, {
+    maxItems: limit
+  });
+
+  const sample = items.map(it => ({
+    id: it.id,
+    slug: it.slug,
+    name: it.fieldData?.[WEBFLOW_FIELDS.NAME],
+    cmsLocaleId: it.cmsLocaleId || null,
+    published: it.isDraft === false && it.isArchived === false,
+  }));
+
+  logger.info('Debug items retrieved', {
+    count: sample.length,
+    collectionId
+  });
+
+  return res.status(HTTP_STATUS.OK).json({
+    count: sample.length,
+    collectionId,
+    cmsLocaleId,
+    sample
+  });
+}
+
+module.exports = withErrorHandling(withCors(handler, {
+  methods: ['GET', 'OPTIONS']
+}));

@@ -1,92 +1,91 @@
-const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
-const memberstackAdmin = require('@memberstack/admin');
+// /api/complete-onboarding.js
+const { getStripeClient } = require('./lib/stripe');
+const { withCors } = require('./lib/cors');
+const { createLogger } = require('./lib/logger');
+const { withErrorHandling } = require('./lib/errors');
+const { updateMemberStripeAccount, verifyMemberExists } = require('./lib/memberstack');
+const { ValidationError, NotFoundError } = require('./lib/errors');
+const { HTTP_STATUS } = require('./lib/constants');
+const { validateRequiredFields, isValidStripeAccountId } = require('./lib/validation');
 
-// Initialize Memberstack admin client lazily to avoid repeated initialization.
-let memberstack;
-function getMemberstack() {
-  if (!memberstack) {
-    if (!process.env.MEMBERSTACK_SECRET_KEY) {
-      throw new Error('Missing MEMBERSTACK_SECRET_KEY environment variable');
-    }
-    memberstack = memberstackAdmin.init(process.env.MEMBERSTACK_SECRET_KEY);
-  }
-  return memberstack;
-}
+const stripe = getStripeClient();
+const logger = createLogger('complete-onboarding');
 
 /**
  * POST /api/complete-onboarding
  *
  * Called after a coach is redirected back to your site from Stripe Connect
- * onboarding.  This endpoint verifies that the account has completed
+ * onboarding. This endpoint verifies that the account has completed
  * onboarding (i.e., `details_submitted` and `charges_enabled` are true)
- * and, if so, stores the Stripe account ID on the coach’s Memberstack profile.
+ * and, if so, stores the Stripe account ID on the coach's Memberstack profile.
  *
  * Request body parameters:
  * - `accountId`: The Stripe account ID returned from `/api/start-onboarding`.
  * - `coachId`: The Memberstack ID of the coach.
  */
-module.exports = async function handler(req, res) {
-  // Enable CORS
-  res.setHeader('Access-Control-Allow-Origin', 'https://www.kravtofly.com');
-  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-
-  if (req.method === 'OPTIONS') {
-    res.status(200).end();
-    return;
-  }
-
+async function handler(req, res) {
   if (req.method !== 'POST') {
-    return res.status(405).json({
+    res.setHeader('Allow', 'POST, OPTIONS');
+    return res.status(HTTP_STATUS.METHOD_NOT_ALLOWED).json({
       success: false,
       error: 'Method not allowed'
     });
   }
 
-  try {
-    const { accountId, coachId } = req.body;
-    if (!accountId || !coachId) {
-      return res.status(400).json({
-        success: false,
-        error: 'Missing required fields: accountId, coachId'
-      });
-    }
+  const { accountId, coachId } = req.body;
 
-    console.log(`Verifying onboarding completion for account: ${accountId}`);
+  // Validate required fields
+  const missing = validateRequiredFields(req.body, ['accountId', 'coachId']);
+  if (missing.length > 0) {
+    throw new ValidationError(`Missing required fields: ${missing.join(', ')}`);
+  }
 
-    // Retrieve account status from Stripe
-    const account = await stripe.accounts.retrieve(accountId);
-    const onboardingComplete = account.details_submitted && account.charges_enabled;
+  // Validate Stripe account ID format
+  if (!isValidStripeAccountId(accountId)) {
+    throw new ValidationError('Invalid Stripe account ID format');
+  }
 
-    if (!onboardingComplete) {
-      return res.status(200).json({
-        success: false,
-        onboardingComplete: false,
-        message: 'Onboarding is not yet complete. Please finish onboarding in Stripe.'
-      });
-    }
+  // SECURITY FIX: Verify the member exists before updating
+  // This prevents account takeover attacks where an attacker could
+  // associate a Stripe account with an arbitrary member ID
+  logger.info('Verifying member exists', { coachId });
+  const memberExists = await verifyMemberExists(coachId);
+  if (!memberExists) {
+    throw new NotFoundError('Coach');
+  }
 
-    // Update Memberstack custom field with the Stripe account ID
-    const ms = getMemberstack();
-    await ms.members.update({
-      id: coachId,
-      data: {
-        customFields: {
-          'stripe-account-id': accountId
-        }
-      }
+  logger.info('Verifying onboarding completion', { accountId, coachId });
+
+  // Retrieve account status from Stripe
+  const account = await stripe.accounts.retrieve(accountId);
+  const onboardingComplete = account.details_submitted && account.charges_enabled;
+
+  if (!onboardingComplete) {
+    logger.warn('Onboarding incomplete', {
+      accountId,
+      details_submitted: account.details_submitted,
+      charges_enabled: account.charges_enabled
     });
 
-    return res.json({
-      success: true,
-      onboardingComplete: true,
-      message: 'Coach has completed onboarding. Stripe account ID stored.'
-    });
-  } catch (error) {
-    console.error('Error completing onboarding:', error);
-    return res.status(400).json({
+    return res.status(HTTP_STATUS.OK).json({
       success: false,
-      error: error.message || 'Failed to complete onboarding'
+      onboardingComplete: false,
+      message: 'Onboarding is not yet complete. Please finish onboarding in Stripe.'
     });
   }
-};
+
+  // Update Memberstack custom field with the Stripe account ID
+  await updateMemberStripeAccount(coachId, accountId);
+
+  logger.info('Onboarding completed successfully', { accountId, coachId });
+
+  return res.status(HTTP_STATUS.OK).json({
+    success: true,
+    onboardingComplete: true,
+    message: 'Coach has completed onboarding. Stripe account ID stored.'
+  });
+}
+
+module.exports = withErrorHandling(withCors(handler, {
+  methods: ['POST', 'OPTIONS']
+}));
